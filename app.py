@@ -6,6 +6,8 @@ import traceback
 import base64
 from PIL import Image
 from io import BytesIO
+import random
+import string
 
 app = Flask(__name__)
 CORS(app, resources={
@@ -16,52 +18,14 @@ CORS(app, resources={
     }
 })
 
+def generate_random_code(length=2):
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+
+
 @app.route('/test', methods=['GET'])
 def test_connection():
     return jsonify({"status": "ok", "message": "Server is running"})
 
-@app.route('/data', methods=['POST'])
-def add_data():
-
-    try:   
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "No JSON data received"}), 400
-            
-        print("Parsed JSON data:", data)
-        
-
-        conn = sqlite3.connect('orders.db')
-        c = conn.cursor()
-        
-        c.execute('''
-            INSERT INTO orders (name, phone_number, latitude, longitude, total, products)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (
-            data.get('name', 'aucun'),
-            data.get('phoneNumber', 'N/A'),
-            data.get('latitude'),
-            data.get('longitude'),
-            data['total'],
-            json.dumps(data['products'])
-        ))
-        
-        conn.commit()
-        conn.close()
-        
-        return jsonify({
-            "status": "success",
-            "message": "Order added successfully",
-            "data": data
-        }), 201
-        
-    except Exception as e:
-        print("Error processing request:", str(e))
-        print("Traceback:", traceback.format_exc())
-        return jsonify({
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
 
 def dict_factory(cursor, row):
     d = {}
@@ -71,17 +35,47 @@ def dict_factory(cursor, row):
 
 def init_db():
     print("Initializing database")
+
     conn = sqlite3.connect('orders.db')
     c = conn.cursor()
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS stores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            address TEXT NOT NULL,
+            phone_number INTEGER DEFAULT NULL,
+            activity TEXT NOT NULL,
+            code TEXT NOT NULL,
+            plan TEXT DEFAULT 'free' CHECK (plan IN ('free', 'pro')),
+            plan_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS clients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            store_id INTEGER NOT NULL,
+            name VARCHAR(100) NOT NULL,
+            phone_number VARCHAR(20),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (store_id) REFERENCES stores (id) ON DELETE CASCADE
+        )
+    ''')
     # Create products table
     c.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            price REAL NOT NULL,
+            store_id INTEGER NOT NULL,
+            name VARCHAR(100) NOT NULL,
+            description TEXT,
+            price FLOAT NOT NULL,
+            category VARCHAR(50),
             new INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (store_id) REFERENCES stores (id) ON DELETE CASCADE
         )
     ''')
     
@@ -100,20 +94,85 @@ def init_db():
     c.execute('''
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            store_id INTEGER NOT NULL,
+            client_id INTEGER,
             name VARCHAR(100) DEFAULT 'aucun',
             phone_number VARCHAR(20) DEFAULT 'N/A',
             latitude FLOAT,
             longitude FLOAT,
             total FLOAT NOT NULL,
             products TEXT NOT NULL,
+            status VARCHAR(20) DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            delivered BOOLEAN DEFAULT FALSE
+            delivered BOOLEAN DEFAULT FALSE,
+            FOREIGN KEY (store_id) REFERENCES stores (id) ON DELETE CASCADE,
+            FOREIGN KEY (client_id) REFERENCES clients (id) ON DELETE SET NULL
         )
     ''')
     
     conn.commit()
     conn.close()
     print("Database initialized successfully")
+
+
+@app.route('/stores', methods=['POST'])
+def new_store():
+    
+    try:
+        conn = sqlite3.connect('orders.db')
+        c = conn.cursor()
+        data = request.get_json()
+        print("Parsed store data:", data)
+
+        required_fields = ['name', 'address', 'phone_number', 'activity']
+        for field in required_fields:
+            if field not in data:
+                error_msg = f"Missing required field: {field}"
+                print(error_msg)
+                return jsonify({"error": error_msg}), 400
+            
+        name = data['name']
+        address = data['address']
+        phone_number = data['phone_number']
+        activity = data['activity']
+
+        code = generate_random_code()
+
+        c.execute('''
+            INSERT INTO stores (name, address, phone_number, activity, code)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (name, address, phone_number, activity, code))
+        
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Store added successfully", "code": code}), 201
+        
+    except Exception as e:
+        print(f"Error adding store: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+    
+
+@app.route('/store/<code>', methods=['GET'])
+def get_store_by_code(code):
+    try:
+        conn = sqlite3.connect('orders.db')
+        c = conn.cursor()
+
+        c.execute("SELECT * FROM stores WHERE code = ?", (code,))
+        store = c.fetchone()
+
+        conn.close()
+
+        if store:
+            column_names = ['id', 'name', 'address', 'phone_number', 'activity', 'code', 'plan', 'plan_updated_at', 'created_at']
+            store_data = dict(zip(column_names, store))
+            return jsonify({"message": "Store found", "store": store_data}), 200
+        
+        return jsonify({"message": "Store not found"}), 404
+
+    except Exception as e:
+        print(f"Error fetching store: {str(e)}")
+        return jsonify({"error": "An error occurred while fetching the store", "details": str(e)}), 500
 
 @app.route('/orders', methods=['GET'])
 def get_orders():
@@ -140,14 +199,12 @@ def get_orders():
         print("Error fetching orders:", str(e))
         return jsonify({"error": str(e)}), 500
 
-@app.route('/products', methods=['POST', 'GET'])
-def manage_products():
-    print(f"Received {request.method} request to /products")
-    print("Request headers:", dict(request.headers))
+@app.route('/products/<int:storeId>', methods=['POST', 'GET'])
+def manage_products(storeId):
+
     
     if request.method == 'POST':
         try:
-            print("Raw request data:", request.get_data())
             name = request.form.get('name')
             price = request.form.get('price')
             is_new = request.form.get('new', '0')
@@ -156,11 +213,11 @@ def manage_products():
             conn = sqlite3.connect('orders.db')
             c = conn.cursor()
             
-            # Insert product first
+            # Insert product with storeId
             c.execute('''
-                INSERT INTO products (name, price, new)
-                VALUES (?, ?, ?)
-            ''', (name, price, is_new))
+                INSERT INTO products (name, price, new, store_id)
+                VALUES (?, ?, ?, ?)
+            ''', (name, price, is_new, storeId))
             
             product_id = c.lastrowid  # Get the ID of the newly inserted product
             
@@ -190,13 +247,14 @@ def manage_products():
             conn.row_factory = dict_factory
             c = conn.cursor()
             
-            # Get all products with their images
+            # Get products filtered by storeId
             c.execute('''
                 SELECT p.*, pi.image_data
                 FROM products p
                 LEFT JOIN product_images pi ON p.id = pi.product_id
+                WHERE p.store_id = ?
                 ORDER BY p.created_at DESC
-            ''')
+            ''', (storeId,))
             products = c.fetchall()
             conn.close()
             
@@ -234,19 +292,18 @@ def delete_product(product_id):
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
-@app.route('/orders', methods=['POST', 'GET'])
-def manage_orders():
-    print(f"Received {request.method} request to /orders")
-    print("Request headers:", dict(request.headers))
+@app.route('/orders/<storeId>', methods=['POST', 'GET'])
+def manage_orders(storeId):
+    print(request.get_data())
     
     if request.method == 'POST':
         try:
             print("Raw request data:", request.get_data())
-            data = request.get_json(force=True)  # force=True to handle any content-type
+            data = request.get_json()
             print("Parsed order data:", data)
 
             # التحقق من البيانات المطلوبة
-            required_fields = ['name', 'phoneNumber', 'products', 'total']
+            required_fields = ['name', 'phoneNumber', 'products', 'store_id', 'client_id', 'total']
             for field in required_fields:
                 if field not in data:
                     error_msg = f"Missing required field: {field}"
@@ -272,11 +329,13 @@ def manage_orders():
             # إدخال الطلب
             c.execute('''
                 INSERT INTO orders 
-                (name, phone_number, latitude, longitude, total, products)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (name, phone_number, store_id, client_id, latitude, longitude, total, products)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 data['name'],
                 data['phoneNumber'],
+                data['store_id'],
+                data['client_id'],
                 latitude,
                 longitude,
                 data['total'],
@@ -314,12 +373,14 @@ def manage_orders():
             conn.row_factory = dict_factory
             c = conn.cursor()
             
+            # استعلام لاسترجاع الطلبات حسب storeId
             c.execute('''
                 SELECT id, name, phone_number, latitude, longitude, 
                        total, products, created_at, delivered
                 FROM orders 
+                WHERE store_id = ?
                 ORDER BY created_at DESC
-            ''')
+            ''', (storeId,))
             
             orders = c.fetchall()
             conn.close()
@@ -333,7 +394,7 @@ def manage_orders():
         except Exception as e:
             print("Error fetching orders:", str(e))
             return jsonify({"error": str(e)}), 500
-
+        
 @app.route('/confirm_delivery/<int:order_id>', methods=['POST'])
 def confirm_delivery(order_id):
     print(f"Received POST request to /confirm_delivery/{order_id}")
@@ -356,6 +417,77 @@ def confirm_delivery(order_id):
         print(f"Error confirming delivery: {str(e)}")
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
+
+@app.route('/store/plan/<code>', methods=['POST'])
+def update_plan(code):
+    try:
+        data = request.get_json()
+        new_plan = data.get('plan')
+        
+        if new_plan not in ['free', 'pro']:
+            return jsonify({"error": "Plan must be either 'free' or 'pro'"}), 400
+            
+        conn = sqlite3.connect('orders.db')
+        c = conn.cursor()
+        
+        # تحديث خطة المحل
+        c.execute('''
+            UPDATE stores 
+            SET plan = ?, plan_updated_at = CURRENT_TIMESTAMP 
+            WHERE code = ?
+        ''', (new_plan, code))
+        
+        # تحديث الخطط المنتهية (أكثر من 30 يوم)
+        c.execute('''
+            UPDATE stores 
+            SET plan = 'free' 
+            WHERE plan = 'pro' 
+            AND julianday('now') - julianday(plan_updated_at) >= 30
+        ''')
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({"message": "Plan updated successfully"}), 200
+        
+    except Exception as e:
+        print("Error:", str(e))
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/register_client', methods=['POST'])
+def register_client():
+    try:
+        data = request.get_json()
+        name = data.get('name')
+        phone_number = data.get('phone_number')
+        store_id = data.get('store_id')
+        
+        if not all([name, phone_number, store_id]):
+            return jsonify({'error': 'Missing required fields'}), 400
+        
+        conn = sqlite3.connect('orders.db')
+        c = conn.cursor()
+        
+        # التحقق من عدم وجود رقم الهاتف مسبقاً لنفس المتجر
+        c.execute('SELECT id FROM clients WHERE phone_number = ? AND store_id = ?', (phone_number, store_id))
+        existing_client = c.fetchone()
+        
+        if existing_client:
+            return jsonify({'client_id': existing_client[0]}), 200
+            
+        c.execute('''
+            INSERT INTO clients (name, phone_number, store_id)
+            VALUES (?, ?, ?)
+        ''', (name, phone_number, store_id))
+        
+        client_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'client_id': client_id}), 201
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.after_request
 def after_request(response):
