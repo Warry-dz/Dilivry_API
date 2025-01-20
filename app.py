@@ -8,6 +8,8 @@ from PIL import Image
 from io import BytesIO
 import random
 import string
+from datetime import datetime, timedelta
+import sqlite3
 
 app = Flask(__name__)
 CORS(app, resources={
@@ -207,6 +209,8 @@ def manage_products(storeId):
         try:
             name = request.form.get('name')
             price = request.form.get('price')
+            description = request.form.get('description')
+            category = request.form.get('category')
             is_new = request.form.get('new', '0')
             image = request.files.get('image')
             
@@ -215,9 +219,9 @@ def manage_products(storeId):
             
             # Insert product with storeId
             c.execute('''
-                INSERT INTO products (name, price, new, store_id)
-                VALUES (?, ?, ?, ?)
-            ''', (name, price, is_new, storeId))
+                INSERT INTO products (name, price, description, category, new, store_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (name, price, description, category, is_new, storeId))
             
             product_id = c.lastrowid  # Get the ID of the newly inserted product
             
@@ -486,6 +490,139 @@ def register_client():
         
         return jsonify({'client_id': client_id}), 201
         
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/stats', methods=['GET'])
+def get_statistics():
+    try:
+        # Connect to the database
+        conn = sqlite3.connect('orders.db')
+        conn.row_factory = dict_factory
+        cur = conn.cursor()
+
+        # Example query to get statistics
+        cur.execute('SELECT COUNT(*) as total_orders FROM orders')
+        total_orders = cur.fetchone()['total_orders']
+
+        cur.execute('SELECT COUNT(*) as total_stores FROM stores')
+        total_stores = cur.fetchone()['total_stores']
+
+        # Additional statistics
+        cur.execute('SELECT COUNT(*) as total_clients FROM clients')
+        total_clients = cur.fetchone()['total_clients']
+
+        cur.execute('SELECT COUNT(*) as total_products FROM products')
+        total_products = cur.fetchone()['total_products']
+
+        # Return the updated statistics as JSON
+        return jsonify({
+            'total_orders': total_orders,
+            'total_stores': total_stores,
+            'total_clients': total_clients,
+            'total_products': total_products
+        })
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({'error': 'An error occurred while fetching statistics'}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/store_stats/<store_id>', methods=['GET'])
+def get_store_statistics(store_id):
+    try:
+        # Get current date and time
+        now = datetime.now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = today_start - timedelta(days=7)
+        month_start = today_start - timedelta(days=30)
+
+        # Basic statistics
+        conn = sqlite3.connect('orders.db')
+        conn.row_factory = dict_factory
+        cur = conn.cursor()
+
+        cur.execute('SELECT COUNT(*) as total_clients FROM clients WHERE store_id = ?', (store_id,))
+        total_clients = cur.fetchone()['total_clients']
+
+        cur.execute('SELECT COUNT(*) as total_orders FROM orders WHERE store_id = ?', (store_id,))
+        total_orders = cur.fetchone()['total_orders']
+
+        # Today's statistics
+        cur.execute('SELECT COUNT(*) as today_orders FROM orders WHERE store_id = ? AND created_at >= ?', (store_id, today_start))
+        today_orders = cur.fetchone()['today_orders']
+        cur.execute('SELECT SUM(total) as today_revenue FROM orders WHERE store_id = ? AND created_at >= ?', (store_id, today_start))
+        today_revenue = cur.fetchone()['today_revenue'] or 0
+
+        # Weekly statistics
+        cur.execute('SELECT COUNT(*) as week_orders FROM orders WHERE store_id = ? AND created_at >= ?', (store_id, week_start))
+        week_orders = cur.fetchone()['week_orders']
+        cur.execute('SELECT SUM(total) as week_revenue FROM orders WHERE store_id = ? AND created_at >= ?', (store_id, week_start))
+        week_revenue = cur.fetchone()['week_revenue'] or 0
+
+        # Monthly statistics
+        cur.execute('SELECT COUNT(*) as month_orders FROM orders WHERE store_id = ? AND created_at >= ?', (store_id, month_start))
+        month_orders = cur.fetchone()['month_orders']
+        cur.execute('SELECT SUM(total) as month_revenue FROM orders WHERE store_id = ? AND created_at >= ?', (store_id, month_start))
+        month_revenue = cur.fetchone()['month_revenue'] or 0
+
+        # Order status statistics
+        cur.execute('SELECT COUNT(*) as pending_orders FROM orders WHERE store_id = ? AND status = "pending"', (store_id,))
+        pending_orders = cur.fetchone()['pending_orders']
+        cur.execute('SELECT COUNT(*) as delivered_orders FROM orders WHERE store_id = ? AND delivered = TRUE', (store_id,))
+        delivered_orders = cur.fetchone()['delivered_orders']
+
+        # Latest orders
+        cur.execute('SELECT id, total, created_at FROM orders WHERE store_id = ? ORDER BY created_at DESC LIMIT 5', (store_id,))
+        latest_orders = cur.fetchall()
+
+        latest_orders_data = [{
+            'id': order['id'],
+            'total': float(order['total']),
+            'created_at': order['created_at']
+        } for order in latest_orders]
+
+        # Top 3 clients this week
+        cur.execute('''
+            SELECT 
+                c.id,
+                c.name,
+                c.phone_number,
+                COUNT(o.id) as orders_count,
+                SUM(o.total) as total_spent
+            FROM clients c
+            JOIN orders o ON c.id = o.client_id
+            WHERE o.store_id = ? 
+            AND o.created_at >= ?
+            GROUP BY c.id
+            ORDER BY total_spent DESC
+            LIMIT 3
+        ''', (store_id, week_start))
+        top_clients = [{
+            'id': row['id'],
+            'name': row['name'],
+            'phone': row['phone_number'],
+            'orders_count': row['orders_count'],
+            'total_spent': float(row['total_spent'])
+        } for row in cur.fetchall()]
+
+        conn.close()
+
+        return jsonify({
+            'total_clients': total_clients,
+            'total_orders': total_orders,
+            'today_orders': today_orders,
+            'today_revenue': float(today_revenue),
+            'week_orders': week_orders,
+            'week_revenue': float(week_revenue),
+            'month_orders': month_orders,
+            'month_revenue': float(month_revenue),
+            'pending_orders': pending_orders,
+            'delivered_orders': delivered_orders,
+            'latest_orders': latest_orders_data,
+            'top_clients': top_clients
+        })
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
