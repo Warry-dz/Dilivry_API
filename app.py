@@ -154,13 +154,21 @@ def new_store():
         return jsonify({"error": str(e)}), 500
     
 
-@app.route('/store/<code>', methods=['GET'])
-def get_store_by_code(code):
+@app.route('/store/login', methods=['GET'])
+def get_store_by_login():
     try:
+        code = request.args.get('code')
+        store_id = request.args.get('store_id')
+
+        if not code or not store_id:
+            return jsonify({"message": "Missing code or store_id"}), 400
+
+        print(f"Code: {code}, Store ID: {store_id}")
+
         conn = sqlite3.connect('orders.db')
         c = conn.cursor()
 
-        c.execute("SELECT * FROM stores WHERE code = ?", (code,))
+        c.execute("SELECT * FROM stores WHERE code = ? AND id = ?", (code, store_id))
         store = c.fetchone()
 
         conn.close()
@@ -168,9 +176,13 @@ def get_store_by_code(code):
         if store:
             column_names = ['id', 'name', 'address', 'phone_number', 'activity', 'code', 'plan', 'plan_updated_at', 'created_at']
             store_data = dict(zip(column_names, store))
-            return jsonify({"message": "Store found", "store": store_data}), 200
-        
-        return jsonify({"message": "Store not found"}), 404
+            return jsonify({"success": True, "message": "Store found", "store": store_data}), 200
+
+        return jsonify({"success": False, "message": "Store not found"}), 404
+
+    except Exception as e:
+        print(f"Error fetching store: {str(e)}")
+        return jsonify({"error": "An error occurred while fetching the store", "details": str(e)}), 500
 
     except Exception as e:
         print(f"Error fetching store: {str(e)}")
@@ -444,10 +456,12 @@ def update_plan(code):
         # تحديث الخطط المنتهية (أكثر من 30 يوم)
         c.execute('''
             UPDATE stores 
-            SET plan = 'free' 
+            SET plan = 'free', 
+                plan_updated_at = CURRENT_TIMESTAMP 
             WHERE plan = 'pro' 
             AND julianday('now') - julianday(plan_updated_at) >= 30
         ''')
+
         
         conn.commit()
         conn.close()
@@ -492,41 +506,6 @@ def register_client():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-@app.route('/api/stats', methods=['GET'])
-def get_statistics():
-    try:
-        # Connect to the database
-        conn = sqlite3.connect('orders.db')
-        conn.row_factory = dict_factory
-        cur = conn.cursor()
-
-        # Example query to get statistics
-        cur.execute('SELECT COUNT(*) as total_orders FROM orders')
-        total_orders = cur.fetchone()['total_orders']
-
-        cur.execute('SELECT COUNT(*) as total_stores FROM stores')
-        total_stores = cur.fetchone()['total_stores']
-
-        # Additional statistics
-        cur.execute('SELECT COUNT(*) as total_clients FROM clients')
-        total_clients = cur.fetchone()['total_clients']
-
-        cur.execute('SELECT COUNT(*) as total_products FROM products')
-        total_products = cur.fetchone()['total_products']
-
-        # Return the updated statistics as JSON
-        return jsonify({
-            'total_orders': total_orders,
-            'total_stores': total_stores,
-            'total_clients': total_clients,
-            'total_products': total_products
-        })
-    except Exception as e:
-        print(traceback.format_exc())
-        return jsonify({'error': 'An error occurred while fetching statistics'}), 500
-    finally:
-        conn.close()
 
 @app.route('/api/store_stats/<store_id>', methods=['GET'])
 def get_store_statistics(store_id):
@@ -625,6 +604,23 @@ def get_store_statistics(store_id):
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/store/all', methods=['GET'])
+def get_all_stores():
+    try:
+        conn = sqlite3.connect('orders.db')
+        conn.row_factory = dict_factory
+        cur = conn.cursor()
+        
+        cur.execute('SELECT * FROM stores')
+        stores = cur.fetchall()
+        
+        return jsonify({'stores': stores})
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({'error': 'An error occurred while fetching stores'}), 500
+    finally:
+        conn.close()
 
 @app.after_request
 def after_request(response):
